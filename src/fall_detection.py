@@ -15,8 +15,8 @@ from ultralytics import YOLO
 
 # ---------- 参数与默认阈值 ----------
 DEF_MIN_FALLEN_SEC = 1.0      # Fallen状态持续时间阈值(秒)
-DEF_RATIO_THR      = 0.55     # 人框高宽比阈值: H/W < 0.6 -> 更像躺
-DEF_AXIS_THR_DEG   = 25.0     # 身体主轴与水平夹角阈值(度): 越小越平躺
+DEF_RATIO_THR      = 0.85     # 人框高宽比阈值: H/W < 0.6 -> 更像躺
+DEF_AXIS_THR_DEG   = 35.0     # 身体主轴与水平夹角阈值(度): 越小越平躺
 DEF_DHDT_THR       = -0.25    # 骨盆相对高度(0~1)每秒下降速率阈值(负值)
 SUPPRESS_SEC       = 8.0      # 同一ID告警抑制窗口
 
@@ -27,7 +27,7 @@ def pca_aspect_ratio(kpts):
     躺/趴时通常更“扁”(值更小)；站立时更“瘦”(值更大)。
     """
     if kpts is None: return None
-    vis = kpts[kpts[:,2] > 0.25, :2]
+    vis = kpts[kpts[:,2] > 0.25, :2]#get all the visible keypoints, score > 0.25
     if vis.shape[0] < 4:
         return None
     X = vis - vis.mean(axis=0, keepdims=True)
@@ -139,7 +139,7 @@ class FallJudge:
         st = self.mem.setdefault(pid, {"state":"Standing","t_fall":0.0,"fallen_dur":0.0,"last_h":None,"last_alert":0.0})
         v = 0.0
         if pelvis_h is not None and st["last_h"] is not None and dt > 0:
-            v = (pelvis_h - st["last_h"]) / dt  # 下降为负
+            v = (pelvis_h - st["last_h"]) / dt  # 下降为正
         if pelvis_h is not None:
             st["last_h"] = pelvis_h
 
@@ -147,19 +147,19 @@ class FallJudge:
         rapid_down = v < self.dhdt_thr
 
         if st["state"] == "Standing":
-            if low_posture and rapid_down:
+            if low_posture and rapid_down:#如果之前是站立，现在低姿态且快速下降，则认为正在跌倒
                 st["state"] = "Falling"
                 st["t_fall"] = 0.0
         elif st["state"] == "Falling":
             st["t_fall"] += dt
-            if low_posture and st["t_fall"] > 0.4:
+            if low_posture and st["t_fall"] > 0.4:#如果之前是跌倒，现在低姿态且持续时间超过0.4秒，则认为已经跌倒
                 st["state"] = "Fallen"
                 st["fallen_dur"] = 0.0
-            elif st["t_fall"] > 1.2:
+            elif st["t_fall"] > 1.2:#如果之前是跌倒，现在持续时间超过1.2秒，则认为已经站起来了
                 st["state"] = "Standing"
         elif st["state"] == "Fallen":
             st["fallen_dur"] += dt
-            if not low_posture:
+            if not low_posture:#如果之前是跌倒，现在不是低姿态，则认为已经站起来了
                 st["state"] = "Standing"
                 st["fallen_dur"] = 0.0
 
@@ -175,7 +175,7 @@ def main():
     ap = argparse.ArgumentParser(description="Headless Fall Detection (YOLOv8-Pose + OpenCV)")
     #ap.add_argument("--source", required=True, help="视频文件路径或 RTSP URL")
     ap.add_argument("--model", default="yolov8n-pose.pt", help="Ultralytics pose 模型权重")
-    ap.add_argument("--save-video", default="./FallDetection/fileDepends/output.mp4", help="保存标注视频到此路径(留空则不保存)")
+    ap.add_argument("--save-video", default="./FallDetection/fileDepends/a4_output.mp4", help="保存标注视频到此路径(留空则不保存)")
     ap.add_argument("--events-json", default="fall_events.json", help="事件输出JSON文件")
     ap.add_argument("--ratio-thr", type=float, default=DEF_RATIO_THR)
     ap.add_argument("--axis-thr-deg", type=float, default=DEF_AXIS_THR_DEG)
@@ -196,7 +196,7 @@ def main():
             pass
 
     # 输入
-    file_path = "./FallDetection/fileDepends/a2.mp4"
+    file_path = "./FallDetection/fileDepends/a4.MP4"
 
     f1 = open(file_path, "r")
     f1.close()
@@ -218,9 +218,9 @@ def main():
 
     tracker = IdTracker(iou_thr=0.3, keep_sec=1.0)
     judge = FallJudge(min_fallen_sec=args.min_fallen_sec,
-                      ratio_thr=0.85,
-                      axis_thr_deg=35.0,
-                      dhdt_thr=args.dhdt_thr)
+                      ratio_thr=DEF_RATIO_THR,
+                      axis_thr_deg=DEF_AXIS_THR_DEG,
+                      dhdt_thr=DEF_DHDT_THR)
 
     events = []
     last_ts = time.time()
@@ -263,10 +263,10 @@ def main():
 
             # 写标注视频（可选）
             if writer is not None:
-                color = (0,0,255) if state=="Fallen" else (0,255,0)
+                color = (0,0,255) if state=="Fallen" or state=="Falling" else (0,255,0)
                 cv2.rectangle(frame, (int(x1),int(y1)), (int(x2),int(y2)), color, 2)
                 pid = assigned.get(i, -1)
-                label = f"id={pid} {state} r={ratio:.2f} ang={-1 if ang is None else ang:.1f} v={v:.2f}"
+                label = f"id={pid} {state} r={ratio:.2f} rbox={ratio_box:.2f} ang={-1 if ang is None else ang:.1f} v={v:.2f}"
                 cv2.putText(frame, label, (int(x1), max(0,int(y1)-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
                 # 画关键点(简易)
                 for (kx,ky,kc) in kpts:
