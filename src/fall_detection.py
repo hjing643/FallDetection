@@ -175,7 +175,7 @@ def main():
     ap = argparse.ArgumentParser(description="Headless Fall Detection (YOLOv8-Pose + OpenCV)")
     #ap.add_argument("--source", required=True, help="视频文件路径或 RTSP URL")
     ap.add_argument("--model", default="yolov8n-pose.pt", help="Ultralytics pose 模型权重")
-    ap.add_argument("--save-video", default="./FallDetection/fileDepends/a4_output.mp4", help="保存标注视频到此路径(留空则不保存)")
+    ap.add_argument("--save-video", default="./FallDetection/fileDepends/Caida_Elcasar (1)_pos_output.mp4", help="保存标注视频到此路径(留空则不保存)")
     ap.add_argument("--events-json", default="fall_events.json", help="事件输出JSON文件")
     ap.add_argument("--ratio-thr", type=float, default=DEF_RATIO_THR)
     ap.add_argument("--axis-thr-deg", type=float, default=DEF_AXIS_THR_DEG)
@@ -196,7 +196,7 @@ def main():
             pass
 
     # 输入
-    file_path = "./FallDetection/fileDepends/a4.MP4"
+    file_path = "./FallDetection/fileDepends/Caida_Elcasar (1).MP4"
 
     f1 = open(file_path, "r")
     f1.close()
@@ -238,7 +238,7 @@ def main():
         last_ts = now_ts
 
         # 推理（关闭verbose以便服务端打印简洁）
-        pos_res = pos_model(frame, conf=0.12, iou=0.85, imgsz=(864, 1536), classes=[0], max_det=100, verbose=False)[0]
+        pos_res = pos_model(frame, conf=0.01, iou=0.85, imgsz=1280, classes=[0], max_det=100, verbose=False)[0]
         pos_boxes = pos_res.boxes.xyxy.cpu().numpy() if pos_res.boxes is not None else np.empty((0,4))
         kpts_all = pos_res.keypoints.data.cpu().numpy() if pos_res.keypoints is not None else np.empty((0,17,3))
 
@@ -266,11 +266,11 @@ def main():
                 color = (0,0,255) if state=="Fallen" or state=="Falling" else (0,255,0)
                 cv2.rectangle(frame, (int(x1),int(y1)), (int(x2),int(y2)), color, 2)
                 pid = assigned.get(i, -1)
-                label = f"id={pid} {state} r={ratio:.2f} rbox={ratio_box:.2f} ang={-1 if ang is None else ang:.1f} v={v:.2f}"
+                label = f"id={pid} {state} r={ratio:.2f} rbox={ratio_box:.2f} box_conf={pos_res.boxes.conf[i]:.2f} ang={-1 if ang is None else ang:.1f} v={v:.2f}"
                 cv2.putText(frame, label, (int(x1), max(0,int(y1)-6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
                 # 画关键点(简易)
                 for (kx,ky,kc) in kpts:
-                    if kc > 0.01:
+                    if kc > 0.00:
                         cv2.circle(frame, (int(kx), int(ky)), 2, (255,255,255), -1)
 
             if alert:
