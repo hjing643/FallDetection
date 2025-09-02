@@ -1,6 +1,6 @@
 from ultralytics import YOLO
 import cv2, numpy as np
-
+import os, glob
 
 def pca_minor_major_from_mask(binmask: np.ndarray):
     ys, xs = np.where(binmask > 0)
@@ -24,25 +24,41 @@ def pca_minor_major_from_mask(binmask: np.ndarray):
 
 
 def min_area_box_ratio_and_angle(binmask: np.ndarray):
-    cnts, _ = cv2.findContours(binmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # 确保是 uint8 的 0/255
+    m = (binmask > 0).astype(np.uint8) * 255
+
+    cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
         return None, None
     c = max(cnts, key=cv2.contourArea)
-    (cx, cy), (w, h), theta = cv2.minAreaRect(c)  # theta ∈ (-90, 0]
+
+    (cx, cy), (w, h), theta = cv2.minAreaRect(c)  # theta in (-90, 0], degrees
     if w < 1 or h < 1:
         return None, None
 
-    box_ratio = float(min(w, h) / max(w, h))      # (0,1] 越小越扁
+    # 细长度：短边/长边 ∈ (0,1]
+    box_ratio = float(min(w, h) / max(w, h))
 
-    # 取长边相对水平的夹角 -> [0,90]
+    # —— 关键：把角度稳健归一化到 [0,90]，表示“长边相对水平”的夹角 ——
+    # 1) 让 theta 表示“长边”的角度
     if w < h:
-        theta = theta + 90.0
-    angle_h = abs(theta)                          # 0=水平, 90=竖直
+        ang = theta + 90.0   # 宽<高，原始角度是短边的，要+90转到长边
+    else:
+        ang = theta          # 宽>=高，已经是长边的角度
+
+    # 2) 规范到 [0,180)
+    ang = (ang % 180.0 + 180.0) % 180.0
+
+    # 3) 压缩到 [0,90]（因为 0° 和 180° 等价）
+    angle_h = ang if ang <= 90.0 else 180.0 - ang
+
     return box_ratio, float(angle_h)
 
 
 def run_inference(source="rail.mp4", model_path="yolov8n-seg.pt", out_path="out.mp4"):
     model = YOLO(model_path)
+    print("task=", model.task)
+    print("names=", model.names)
 
     cap = cv2.VideoCapture(source)
     W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -56,8 +72,8 @@ def run_inference(source="rail.mp4", model_path="yolov8n-seg.pt", out_path="out.
     # 用 generator 流式推理
     results = model.predict(
         source=source,
-        imgsz=640, #640,960,1280
-        conf=0.05,
+        imgsz=1280, #640,960,1280
+        conf=0.3,
         iou=0.6,
         classes=[0],
         stream=True
@@ -82,14 +98,15 @@ def run_inference(source="rail.mp4", model_path="yolov8n-seg.pt", out_path="out.
                 ratio = 0.0
                 ang = 0.0
                 method = "unknow"
+
                 # 任选其一或做融合
                 lying = False
-                if pca_ratio is not None and pca_ratio < 0.5:
+                if pca_ratio is not None and pca_ratio < 0.6:
                     method = "pca"
                     #细长目标用angel判断
                     ratio = pca_ratio
                     ang = pca_ang_h
-                    if pca_ang_h is not None and pca_ang_h < 65:
+                    if pca_ang_h is not None and pca_ang_h < 60:
                         lying = True
                     else:
                         lying = False
@@ -99,23 +116,31 @@ def run_inference(source="rail.mp4", model_path="yolov8n-seg.pt", out_path="out.
                     method = "min"
                     ratio = box_ratio
                     ang = box_ang_h
-                    if box_ratio >= 0.8:
+                    if box_ratio >= 0.95:
                         lying = False
                     # 2) 根据角度判定
                     else:
-                        if box_ang_h < 70:
+                        if box_ang_h < 60:
                             lying = True
                         else:
                             lying = False
 
-                color = (0, 200, 0) if not lying else (0, 0, 255)
                 x1, y1, x2, y2 = map(int, res.boxes.xyxy[i].cpu().numpy())
+                mask_area = binmask.sum() / 255
+                bbox_area = (x2 - x1) * (y2 - y1)
+                solidity = mask_area / (bbox_area + 1e-6)
+
+                if solidity > 0.8:
+                    pass
+                    #lying = True
+
+                color = (0, 200, 0) if not lying else (0, 0, 255)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
                 reasons = []
                 txt = ""
                 if method != "unknown":
-                    reasons.append(f"ang:{ang:.2f},ratio:{ratio:.2f},meth:{method}")
+                    reasons.append(f"a:{pca_ang_h:.1f},{box_ang_h:.1f},r:{pca_ratio:.1f},{box_ratio:.1f},m:{method},s:{solidity:.1f}")
                 if reasons:
                     txt += " [" + ",".join(reasons) + "]"
                 txt += f"conf:{res.boxes.conf[i]:.2f}"
@@ -131,7 +156,31 @@ def run_inference(source="rail.mp4", model_path="yolov8n-seg.pt", out_path="out.
     writer.release()
     print(f"✅ 结果已保存到 {out_path}")
 
+def runAll():
+    in_dir = "./FallDetection/fileDepends"
+    model_path = "yolov8m-seg.pt"
+    # 匹配 .mp4 / .MP4（glob 默认大小写敏感，要分别写）
+    video_files = glob.glob(os.path.join(in_dir, "*.mp4")) + \
+                  glob.glob(os.path.join(in_dir, "*.MP4"))
+
+    for source in video_files:
+        # 拆分目录、文件名、扩展名
+        base, ext = os.path.splitext(source)
+        out_path = f"{base}_seg_out{ext}"
+
+        print(f"▶️ 处理文件: {source}")
+        run_inference(source, model_path, out_path)
+        
+def runOnce():
+    source = "./FallDetection/fileDepends/Caida_Elcasar (1).MP4"
+    # 拆分目录、文件名、扩展名
+    base, ext = os.path.splitext(source)
+    # 拼接新的输出路径
+    out_path = f"{base}_seg_out{ext}"
+    run_inference(source, "yolov8m-seg", out_path)
 
 if __name__ == "__main__":
-    run_inference(source="./FallDetection/fileDepends/Desmayos_Torrelodones.mp4", model_path="yolov8n-seg.pt", 
-    out_path="./FallDetection/fileDepends/Desmayos_Torrelodones_seg_output.mp4")
+    runAll()
+    #runOnce()
+    
+
